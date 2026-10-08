@@ -364,7 +364,7 @@ def _feedback_conn(trace_id):
 def test_feedback_is_recorded_as_a_human_assessment(traced, capsys):
     rc = commands._feedback(_feedback_conn(TRACE_ID),
                             SimpleNamespace(query_id=5, verdict="bad", comment="source [4] is unrelated"))
-    assert rc == 0 and "Đã ghi feedback 'bad'" in capsys.readouterr().out
+    assert rc == 0 and "Recorded feedback 'bad'" in capsys.readouterr().out
     posted = [json.loads(body)["assessment"] for _, path, _, body in traced if path.endswith("/assessments")]
     assert len(posted) == 1
     assessment = posted[0]
@@ -376,7 +376,7 @@ def test_feedback_is_recorded_as_a_human_assessment(traced, capsys):
 
 def test_feedback_without_trace_explains_why(capsys):
     rc = commands._feedback(_feedback_conn(None), SimpleNamespace(query_id=5, verdict="good", comment=None))
-    assert rc == 1 and "tracing đang tắt" in capsys.readouterr().out
+    assert rc == 1 and "has no trace (tracing was off" in capsys.readouterr().out
 
 
 def test_feedback_on_a_trace_id_that_is_not_mlflow_is_refused(server, capsys):
@@ -384,7 +384,7 @@ def test_feedback_on_a_trace_id_that_is_not_mlflow_is_refused(server, capsys):
     assert tracing.configure(url, "rag-test")
     rc = commands._feedback(_feedback_conn("01a0f9e2-6a1b-4c1e-9d55-0f3c2b7e8a10"),
                             SimpleNamespace(query_id=3, verdict="good", comment=None))
-    assert rc == 1 and "không phải dạng của MLflow" in capsys.readouterr().out
+    assert rc == 1 and "not an MLflow one" in capsys.readouterr().out
     assert not any(path.endswith("/assessments") for _, path, _, _ in requests)
 
 

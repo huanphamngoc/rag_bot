@@ -1,111 +1,113 @@
 # crawler-rag
 
-Ứng dụng RAG (hỏi đáp có dẫn nguồn) trên dữ liệu thu hồi thuốc (FDA) và hàng tiêu dùng (CPSC) mà dự án crawler
-(`E:\Job\crawler`) đã thu thập. Dự án có vector database riêng (Postgres 16 + pgvector) và một pipeline nạp
-**tăng dần** dựa trên change log của crawler: mỗi lần chỉ đọc bản ghi đã đổi, chỉ nhúng văn bản đã đổi.
+Grounded question answering over the FDA drug recalls and CPSC consumer product recalls collected by the
+crawler project (`E:\Job\crawler`). It owns its own vector database (Postgres 16 + pgvector) and loads
+**incrementally** from the crawler's change log: each run reads only the records that changed, and embeds
+only the text that changed.
 
 ```
-app/rules/*.yaml ──► doc type · luật chất lượng · cổng chặn câu hỏi
+app/rules/*.yaml ──► doc types · quality rules · the question gate
                      │
-crawler Postgres ──(analyst_ro, 1 snapshot)──► ingest graph ──► pgvector ──► chat graph ──► web / CLI
-  crawl.record_change = watermark        plan→extract→quality→   rag.document   qualify→condense→
-  38 bảng → meta.*                       stage(SCD2)→embed       mỗi version 1 dòng  retrieve→answer
+crawler Postgres ──(analyst_ro, one snapshot)──► ingest graph ──► pgvector ──► chat graph ──► web / CLI
+  crawl.record_change = watermark          plan→extract→quality→   rag.document   qualify→condense→
+  38 tables → meta.*                       stage(SCD2)→embed       one row/version  retrieve→answer
 ```
 
-- **Luật nghiệp vụ là YAML** (`app/rules/`): một loại tài liệu = một file, không có SQL trong Python.
-- **Metadata rút từ Postgres** (`meta.*`): file YAML được đối chiếu với bảng/cột/khoá/quan hệ thật trước khi đọc dữ liệu.
-- **`rag.document` là SCD Type 2**: giữ mọi version, truy hồi chỉ đọc version hiện tại.
-- **LangGraph** điều phối cả hai luồng; luồng hỏi đáp có bước **qualify** chặn câu hỏi không nên tới model.
-- **MLflow tự host** (`:5001`) ghi lại từng câu trả lời: span, token, giá tiền — câu hỏi bị chặn tạo trace không có span model nào.
+- **The business rules are YAML** (`app/rules/`): one document type is one file, and no SQL is left in Python.
+- **The metadata is read from Postgres** (`meta.*`): the YAML is checked against the real tables, columns, keys and relationships before any data is read.
+- **`rag.document` is SCD Type 2**: every version is kept, and retrieval reads only the current one.
+- **LangGraph** drives both flows; the question flow has a **qualify** step that stops questions that should not reach the model.
+- **Self-hosted MLflow** (`:5001`) records every answer: spans, tokens, cost — a blocked question produces a trace with no model span in it at all.
 
-Thiết kế và bằng chứng: [docs/DESIGN.md](docs/DESIGN.md).
+The design, and the evidence behind it: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Điều kiện
+## What you need
 
 - Docker Desktop.
-- Stack crawler đang chạy (`E:\Job\crawler`: `docker compose up -d postgres`), Postgres ở cổng 5433, role `analyst_ro`.
-- Model: mặc định Vertex AI, dùng đăng nhập `gcloud auth application-default login` của máy (`GCLOUD_CONFIG` trong `.env`).
+- The crawler stack running (`E:\Job\crawler`: `docker compose up -d postgres`), Postgres on port 5433, role `analyst_ro`.
+- A model: Vertex AI by default, using this machine's `gcloud auth application-default login` (`GCLOUD_CONFIG` in `.env`).
 
-## Bắt đầu
+## Getting started
 
 ```bash
-cp .env.example .env            # điền VECTORDB_PASSWORD, SOURCE_PG_PASSWORD (= ANALYST_RO_PASSWORD của crawler), GCLOUD_CONFIG
+cp .env.example .env            # fill in VECTORDB_PASSWORD, SOURCE_PG_PASSWORD (the crawler's ANALYST_RO_PASSWORD), GCLOUD_CONFIG
 docker compose up -d vectordb
 docker compose run --rm app migrate
-docker compose run --rm app init           # thăm dò model 1 lần, cố định vector(1536), tạo HNSW
-docker compose run --rm app catalog        # rút metadata từ DB crawler (chỉ đọc)
-docker compose run --rm app rules-check    # đối chiếu rules/*.yaml với metadata đó
-docker compose run --rm app plan           # chỉ đọc: chế độ, cửa sổ change_id, số chunk + ký tự sẽ nhúng
-docker compose run --rm app ingest         # nạp (lần đầu: toàn bộ; sau đó: tăng dần)
+docker compose run --rm app init           # probe the model once, fix vector(1536), build the HNSW index
+docker compose run --rm app catalog        # read the metadata out of the crawler's database (read only)
+docker compose run --rm app rules-check    # check rules/*.yaml against that metadata
+docker compose run --rm app plan           # read only: the mode, the change_id window, the chunks and characters to embed
+docker compose run --rm app ingest         # load (the first run is full; every run after it is incremental)
 docker compose up -d web                   # http://localhost:8089
 ```
 
-## Hằng ngày
+## Day to day
 
-| Việc | Lệnh |
+| What | Command |
 |---|---|
-| Nạp phần mới sau mỗi lần crawler chạy | `docker compose run --rm app ingest` |
-| Tự nạp mỗi 15 phút | `docker compose --profile scheduler up -d` |
-| Xem watermark so với nguồn, các lô gần đây | `docker compose run --rm app status` |
-| Đối chiếu lại toàn bộ (sau `crawler rebuild`) | `docker compose run --rm app ingest --full` |
-| Chỉ dựng tài liệu, nhúng sau / giới hạn chi phí | `ingest --no-embed`, `embed --max-chunks 5000` |
-| Hỏi | `docker compose run --rm app ask "..."`, `app chat`, `app search "..."` |
-| Xem trace của các câu trả lời | `docker compose --profile mlflow up -d` → http://localhost:5001 |
-| Chấm điểm một câu trả lời lên trace của nó | `docker compose run --rm app feedback 3 good` |
-| Test | `docker compose --profile test run --rm test` |
+| Load what is new after a crawler run | `docker compose run --rm app ingest` |
+| Load every 15 minutes by itself | `docker compose --profile scheduler up -d` |
+| The watermark against the source, and recent batches | `docker compose run --rm app status` |
+| Reconcile everything again (after a `crawler rebuild`) | `docker compose run --rm app ingest --full` |
+| Build documents now, embed later / cap the cost | `ingest --no-embed`, `embed --max-chunks 5000` |
+| Ask | `docker compose run --rm app ask "..."`, `app chat`, `app search "..."` |
+| Look at the traces of the answers | `docker compose --profile mlflow up -d` → http://localhost:5001 |
+| Score one answer onto its trace | `docker compose run --rm app feedback 3 good` |
+| Tests | `docker compose --profile test run --rm test` |
 
-Sau khi sửa `app/rules/`:
+After editing `app/rules/`:
 
-| Việc | Lệnh |
+| What | Command |
 |---|---|
-| Kiểm luật với schema thật (bảng, cột, khoá, quan hệ) | `docker compose run --rm app rules-check` |
-| Rút lại metadata, xem hoặc xuất ra YAML | `app catalog`, `app catalog --export catalog.yaml` |
-| Xem các version của một tài liệu | `app history "drug_recall:D-0853-2026"` |
-| Thử cổng chặn câu hỏi, không gọi model | `app qualify "how many recalls in 2026?"` |
+| Check the rules against the real schema (tables, columns, keys, relationships) | `docker compose run --rm app rules-check` |
+| Read the metadata again, look at it or export it | `app catalog`, `app catalog --export catalog.yaml` |
+| Every version of one document | `app history "drug_recall:D-0853-2026"` |
+| Try the question gate, with no model call | `app qualify "how many recalls in 2026?"` |
 
-Thư mục `app/rules/` được mount vào container nên **không cần build lại image** khi sửa luật. Sửa file nào ảnh
-hưởng tới văn bản tài liệu thì lần `ingest` sau tự chuyển sang chế độ `full` (chữ ký watermark chứa digest của
-file) — nhưng chỉ cắt lại chunk của tài liệu nào thật sự đổi.
+`app/rules/` is mounted into the container, so **the image does not need rebuilding** when a rule changes.
+Edit a file that affects document text and the next `ingest` switches to `full` by itself (the watermark
+signature contains a digest of the file) — but it still re-chunks only the documents that really changed.
 
-## Tracing bằng MLflow
+## Tracing with MLflow
 
 ```bash
-# MLFLOW_DB_PASSWORD trong .env (bất kỳ chuỗi nào), rồi:
+# MLFLOW_DB_PASSWORD in .env (any string), then:
 docker compose --profile mlflow up -d --build     # UI: http://localhost:5001
-# MLFLOW_TRACKING_URI=http://mlflow:5000 trong .env để bật tracing, rồi khởi động lại web
+# MLFLOW_TRACKING_URI=http://mlflow:5000 in .env turns tracing on, then restart web
 docker compose up -d web
 ```
 
-MLflow 3.16.1 tự host, trace nằm trong database `mlflow` riêng bên trong container `vectordb`. Cổng 5001 vì 5000
-đã bị MLflow của dự án crawler chiếm. Telemetry của MLflow bị tắt.
+MLflow 3.16.1, self-hosted, with its traces in a separate `mlflow` database inside the `vectordb` container.
+Port 5001 because the crawler project's own MLflow already holds 5000. MLflow's telemetry is off.
 
-Mỗi câu trả lời là một trace: `rag_ask` → `qualify_question` (GUARDRAIL) → `hybrid_retrieve` (+ embed/vector/text)
-→ `generate_answer`, kèm token và **giá tiền** do server tự tính. Câu hỏi bị cổng qualify chặn tạo trace **chỉ có
-2 span**, không có span model nào — đó là cách trả lời câu "câu hỏi này có tốn tiền không" bằng chính trace. Tag
-`qualify_decision` và `qualify_rule` tìm kiếm được trong danh sách trace.
+Every answer is one trace: `rag_ask` → `qualify_question` (GUARDRAIL) → `hybrid_retrieve` (plus embed/vector/text)
+→ `generate_answer`, with tokens and the **cost** the server works out itself. A question the gate stops
+produces a trace with **2 spans and no model span** — which is how "did this question cost anything?" gets
+answered from the trace itself. The `qualify_decision` and `qualify_rule` tags are searchable in the trace list.
 
-## Duyệt trước khi trả tiền nhúng
+## Approving the embedding bill
 
-Nhúng là bước duy nhất tốn tiền. `INGEST_EMBED_APPROVAL_CHUNKS=50` trong `.env` nghĩa là: khi một lần
-nạp phải nhúng hơn 50 đoạn mới, nó **dừng lại và chờ bạn** thay vì tự trả tiền.
+Embedding is the only step that costs money. `INGEST_EMBED_APPROVAL_CHUNKS=50` in `.env` means: when a run
+would have to embed more than 50 new chunks, it **stops and waits for you** instead of paying by itself.
 
 ```
-⏸  Dừng trước bước nhúng: 132 đoạn mới (144,251 ký tự) vượt ngưỡng 50.
-   Tài liệu và watermark đã được ghi; chỉ bước nhúng đang chờ bạn.
-   Duyệt:   crawlerrag approve 4d07233cf13e4e459d7f10dc443bd615
-   Từ chối: crawlerrag approve 4d07233cf13e4e459d7f10dc443bd615 --no
+⏸  Paused before embedding: 132 new chunks (144,251 characters) is over the threshold of 50.
+   Documents and the watermark are written; only the embedding step is waiting for you.
+   Approve: crawlerrag approve 4d07233cf13e4e459d7f10dc443bd615
+   Refuse:  crawlerrag approve 4d07233cf13e4e459d7f10dc443bd615 --no
 ```
 
-Lúc dừng, tài liệu và watermark **đã ghi xong** — chờ bao lâu cũng không mất việc đã làm, và lần chạy
-sau không đọc lại cửa sổ đó. Số in ra là số sẽ bị trừ tiền (văn bản trùng nhau chỉ mua một lần). Từ
-chối không phải lỗi: các đoạn vẫn nằm chờ và `crawlerrag embed` nhúng chúng khi bạn muốn.
+When it pauses, the documents and the watermark are **already written** — waiting costs none of the work
+done so far, and the next run does not read that window again. The number printed is what will be charged
+(identical text is bought once). Refusing is not an error: the chunks stay pending and `crawlerrag embed`
+takes them whenever you want.
 
-Đặt `0` để tắt. Cổng này cần `INGEST_GRAPH_CHECKPOINT=true` (mặc định), vì một lần dừng không lưu được
-thì không trả lời được.
+Set it to `0` to switch the gate off. It needs `INGEST_GRAPH_CHECKPOINT=true` (the default), because a pause
+that cannot be stored cannot be answered.
 
-## Khi câu hỏi chưa rõ, hệ thống hỏi lại
+## When the question is not clear, it asks back
 
-Gõ `insulin` — một chủ đề, chưa phải câu hỏi — và lượt đó **tạm dừng** thay vì bị từ chối:
+Type `insulin` — a subject, not yet a question — and the turn **pauses** instead of being refused:
 
 ```
 That is a subject, not a question yet. Here is what the records actually say about it.
@@ -114,109 +116,114 @@ That is a subject, not a question yet. Here is what the records actually say abo
   • Why did Novo Nordisk Inc recall a drug?         FDA drug recall D-0615-2021 - Novo Nordisk Inc
 ```
 
-Bấm một câu (hoặc gõ câu của bạn) thì **chính lượt đang chờ** chạy tiếp — không phải lượt mới. Các câu
-mẫu được dựng từ bản ghi **thật trong index** theo từ bạn vừa gõ, nên chúng luôn trả lời được và không
-bao giờ lệch khi dữ liệu đổi. Sinh chúng chỉ dùng từ khoá, không gọi nhúng, nên hỏi lại miễn phí.
+Click one (or type your own) and **the waiting turn** carries on — not a new one. The examples are built
+from records that are **really in the index**, from the word you just typed, so they can always be answered
+and never drift as the data changes. Building them uses the lexical side only, with no embedding call, so
+asking back is free.
 
-Chỉ câu **mơ hồ** được hỏi lại. Câu ngoài phạm vi, câu tiêm prompt, hay câu xin giúp làm điều có hại thì
-bị từ chối và đóng lại — mời sửa lại một câu hỏi về cách chế tạo vũ khí là mời thử lại.
+Only a **vague** question is asked about. Out of scope, prompt injection, or a request for help doing harm
+is refused and closed — inviting someone to reword a question about building a weapon is inviting them to
+try again.
 
-Tắt bằng `RAG_CHAT_CLARIFY=false` trong `.env` (cần `docker compose up -d web` để có hiệu lực).
+Turn it off with `RAG_CHAT_CLARIFY=false` in `.env` (needs `docker compose up -d web` to take effect).
 
-## Trả lời chảy dần trên trang web
+## Streaming on the web page
 
-Trang web gọi `POST /api/ask/stream` và hiện câu trả lời **trong lúc model viết**, rồi dựng lại bong
-bóng hoàn chỉnh (trích dẫn, nguồn, token, link trace) khi xong. Hội thoại vẫn được giữ nên hỏi tiếp
-ngay trong cùng session.
+The page calls `POST /api/ask/stream` and shows the answer **while the model writes it**, then rebuilds the
+finished bubble (citations, sources, tokens, the trace link) when it is done. The conversation is still
+kept, so the next question continues in the same session.
 
-Câu hỏi bị cổng qualify chặn không có mảnh nào chảy ra — vì không có lần gọi model nào. Provider không
-hỗ trợ stream (ollama, các endpoint kiểu OpenAI) vẫn chạy bình thường, chỉ không có hiệu ứng gõ chữ.
+A question the gate stops streams nothing at all — because no model is called. A provider that cannot
+stream (ollama, OpenAI-shaped endpoints) still works, just without the typing effect.
 
-## Nâng cấp một index đã có sẵn
+## Upgrading an index that already exists
 
-V005 biến `rag.document` thành SCD Type 2 và chuyển `rag.chunk` từ `doc_id` sang `doc_sk`. Nó **không** ghi lại
-dòng chunk nào, nên vector (và các entry HNSW) được giữ nguyên.
+V005 turns `rag.document` into SCD Type 2 and moves `rag.chunk` from `doc_id` to `doc_sk`. It rewrites **no**
+chunk rows, so the vectors (and the HNSW entries) are kept.
 
-**Migrate trước khi build lại image.** Image mới chạy với database cũ sẽ trả HTTP 500
+**Migrate before rebuilding the image.** A new image against an old database returns HTTP 500
 (`column "is_current" does not exist`).
 
 ```bash
-# đường lùi: một bản sao chưa migrate, mất vài giây, không đụng DB gốc
+# a way back: an un-migrated copy, a few seconds, and it does not touch the original
 docker exec crawler-rag-vectordb psql -U rag -d postgres -c "CREATE DATABASE rag_pre_scd2 TEMPLATE rag"
 docker compose run --rm app migrate
-docker compose run --rm app plan         # kỳ vọng: mode full, 0 chunk cần nhúng
+docker compose run --rm app plan         # expect: mode full, 0 chunks to embed
 docker compose run --rm app ingest
 ```
 
-Đã chạy thật trên index 793 MB (xem mục kết quả bên dưới): 35.796/35.796 vector giữ nguyên, lần `ingest` đầu tốn
-**0 request nhúng** trong 9,1 s.
+Run for real on the 793 MB index (see the results below): 35,796/35,796 vectors kept, and the first `ingest`
+afterwards made **0 embedding requests** in 9.1 s.
 
-## Kết quả (2026-10-04, dữ liệu thật của crawler, máy này)
+## Results (2026-10-04, the crawler's real data, on this machine)
 
-**Nạp lần đầu (full)**
+**The first load (full)**
 
-| Bước | Kết quả |
+| Step | Result |
 |---|---|
-| `plan` (chỉ đọc) | drug_recall 17.937 key → 18.771 chunk cần nhúng, 17,5 triệu ký tự; cpsc_recall 10.002 key → 16.931 chunk, 18,5 triệu ký tự |
-| `ingest --no-embed` | 27.939 tài liệu, 35.746 chunk, 199.310 từ khoá trong 29 s (lô 1: 18,0 s, lô 2: 11,1 s) |
-| So với index cũ của crawler | 27.939/27.939 tài liệu và 35.746/35.746 chunk trùng hash: văn bản giống từng byte |
-| Nhúng, lần 1 | dừng sau 11.136 text / 174 request / 19 phút vì quota mỗi phút của Vertex AI (HTTP 429), phần đã nhúng được giữ |
-| Nhúng, lần 2 | 24.616 text / 385 request / 41 phút, `succeeded`. Có 184 phản hồi 429 tạm thời, retry của provider xử lý hết; cơ chế chờ quota mới thêm (`quota_waits`) không phải dùng lần nào |
-| Tổng phần nhúng | 35.752 text khác nhau, 36,0 triệu ký tự, **11.092.546 token** (Vertex báo), 0 text bị cắt; ≈ **$1,66** theo giá $0,00015 / 1.000 token |
-| Kích thước | vector DB 793 MB, trong đó HNSW 279 MB |
+| `plan` (read only) | drug_recall 17,937 keys → 18,771 chunks to embed, 17.5M characters; cpsc_recall 10,002 keys → 16,931 chunks, 18.5M characters |
+| `ingest --no-embed` | 27,939 documents, 35,746 chunks, 199,310 lexemes in 29 s (batch 1: 18.0 s, batch 2: 11.1 s) |
+| Against the crawler's own older index | 27,939/27,939 documents and 35,746/35,746 chunks matched by hash: the text is identical byte for byte |
+| Embedding, run 1 | stopped after 11,136 texts / 174 requests / 19 minutes on Vertex AI's per-minute quota (HTTP 429); what was embedded was kept |
+| Embedding, run 2 | 24,616 texts / 385 requests / 41 minutes, `succeeded`. 184 transient 429s, all handled by the provider's retry; the new quota-wait mechanism (`quota_waits`) was never needed |
+| The embedding total | 35,752 distinct texts, 36.0M characters, **11,092,546 tokens** (as Vertex reported), 0 texts truncated; about **$1.66** at $0.00015 per 1,000 tokens |
+| Size | vector database 793 MB, of which HNSW is 279 MB |
 
-**Nạp tăng dần (real)**
+**An incremental load (real)**
 
-1. Crawler chạy `crawl openfda_enforcement --mode incremental` (run #20): 2 request HTTP, 123 bản ghi → 50 mới,
-   7 đổi, 66 giữ nguyên; change log thêm 57 dòng.
-2. `plan`: cửa sổ change_id (155.804, 1.528.261], 57 key → 50 tài liệu mới, 6 đổi, **1 không đổi** (bản ghi nguồn đổi
-   nhưng văn bản tài liệu không đổi), 56 chunk cần nhúng.
-3. `ingest`: đúng như plan, lô mất **0,077 s** (lô full: 18 s); cpsc_recall `nothing`.
-4. `ingest` lần nữa: cả hai `nothing`, 0 lần gọi model, 2,2 s tính cả khởi động container.
+1. The crawler ran `crawl openfda_enforcement --mode incremental` (run #20): 2 HTTP requests, 123 records → 50 new,
+   7 changed, 66 unchanged; 57 rows added to the change log.
+2. `plan`: change_id window (155,804, 1,528,261], 57 keys → 50 new documents, 6 changed, **1 unchanged** (the source
+   record changed but the document text did not), 56 chunks to embed.
+3. `ingest`: exactly as planned, and the batch took **0.077 s** (the full batch took 18 s); cpsc_recall was `nothing`.
+4. `ingest` again: both `nothing`, 0 model calls, 2.2 s including container start-up.
 
-**Hỏi đáp** (web `:8089`, Vertex `gemini-2.5-flash`):
+**Answering** (web on `:8089`, Vertex `gemini-2.5-flash`):
 
-- "Why did Pfizer recall a drug?" + bộ lọc `year=2026` → nguồn [1] là `D-0853-2026`, bản ghi vào bằng lô tăng dần,
-  được cả hai retriever tìm ra; trả lời "Lack of Assurance of Sterility [1]" (3,9 s; 4.073 / 147 token).
-- Cùng câu hỏi viết "in September 2026", **không** có bộ lọc → không tìm ra bản ghi đó: các recall cũ của Pfizer xếp
-  trên, còn ngày trong văn bản ở dạng `2026-09-04`. Model trả lời đúng là các đoạn truy hồi không chứa thông tin, không
-  bịa. Câu hỏi theo thời gian hiện cần bộ lọc `year` (docs/DESIGN.md mục 11).
+- "Why did Pfizer recall a drug?" with the filter `year=2026` → source [1] is `D-0853-2026`, the record that arrived
+  in the incremental batch, found by both retrievers; the answer was "Lack of Assurance of Sterility [1]"
+  (3.9 s; 4,073 / 147 tokens).
+- The same question written "in September 2026", with **no** filter → that record is not found: older Pfizer recalls
+  rank above it, and the date in the text is written `2026-09-04`. The model correctly said the retrieved excerpts
+  do not contain the information rather than inventing it. Questions about time currently need the `year` filter
+  (docs/DESIGN.md §11).
 
-## Kết quả (2026-10-05, sau khi chuyển sang YAML + SCD2 + LangGraph)
+## Results (2026-10-05, after the move to YAML + SCD2 + LangGraph)
 
-Chạy **chỉ đọc** trên DB crawler thật và index đang chạy — không ghi, không migrate:
+A **read-only** run against the real crawler database and the running index — nothing written, nothing migrated:
 
-| Đo được | Kết quả |
+| Measured | Result |
 |---|---|
-| Catalog của `crawl`, `drug`, `retail` | 38 bảng, 383 cột, 25 quan hệ (tất cả là foreign key khai báo thật) |
-| `rules-check` trên catalog đó | **0 lỗi, 0 cảnh báo** |
-| Dựng lại toàn bộ tài liệu từ YAML rồi so `content_hash` với index đang chạy | **27.989/27.989 giống nhau**, 0 khác → chuyển sang YAML không tốn một đồng nhúng nào |
-| Index hiện tại | 27.989 tài liệu, 35.796 chunk, 35.796 vector, 793 MB, đang ở V004 |
-| Cổng qualify trên 10 câu hỏi thật | phân loại đúng cả 10 (bảng đầy đủ trong docs/DESIGN.md mục 9) |
+| Catalog of `crawl`, `drug`, `retail` | 38 tables, 383 columns, 25 relationships (every one a real declared foreign key) |
+| `rules-check` against that catalog | **0 errors, 0 warnings** |
+| Rebuilding every document from the YAML and comparing `content_hash` with the running index | **27,989/27,989 identical**, 0 different → moving to YAML cost nothing in embedding |
+| The index as it stands | 27,989 documents, 35,796 chunks, 35,796 vectors, 793 MB, at V004 |
+| The qualify gate over 10 real questions | all 10 classified correctly (the full table is in docs/DESIGN.md §9) |
 
-Phát hiện khi thử câu hỏi thật: tiếng Việt **không dấu** ("Tong so vu thu hoi ... la bao nhieu?") lúc đầu bị xếp
-là ngoài phạm vi. So khớp luật giờ bỏ dấu ở cả hai phía, câu hỏi người dùng gõ thì không bị đổi.
+Something the real questions turned up: Vietnamese typed **without diacritics** ("Tong so vu thu hoi ... la bao
+nhieu?") was classified as out of scope at first. Rule matching now folds the diacritics away on both sides, while
+what the user typed is never changed.
 
-### Migration và tracing, chạy thật trên index 793 MB
+### The migration and tracing, run for real on the 793 MB index
 
-| Bước | Kết quả |
+| Step | Result |
 |---|---|
-| `migrate` (sau khi tạo bản sao `rag_pre_scd2` làm đường lùi) | 27.989 tài liệu đều `is_current` version 1; **35.796/35.796 vector giữ nguyên**; 793 MB → 905 MB (index mới) |
-| `plan` | mode `full`, **0 mới, 0 đổi, 27.989 giữ, 0 chunk cần nhúng** (7,9 s) |
-| `ingest` lần đầu | đúng như `plan`, **0 request nhúng** (9,1 s) |
-| `ingest` lần sau | `incremental` / `nothing`, 0 lần gọi model |
-| Cổng chất lượng | tìm ra 1/17.987 dòng có `classification = "Not Yet Classified"` — giá trị FDA dùng thật; luật đã được sửa để nhận nó |
-| Sửa luật chất lượng rồi chạy lại | quay về `incremental` (digest không đổi) và có hiệu lực **không cần build lại image** |
-| Trang web | `/api/ask` trả lời đúng `D-0853-2026` kèm `trace_url` |
+| `migrate` (after taking the `rag_pre_scd2` copy as a way back) | all 27,989 documents `is_current` at version 1; **35,796/35,796 vectors kept**; 793 MB → 905 MB (the new indexes) |
+| `plan` | mode `full`, **0 new, 0 changed, 27,989 unchanged, 0 chunks to embed** (7.9 s) |
+| The first `ingest` | exactly as `plan` said, **0 embedding requests** (9.1 s) |
+| Every `ingest` after it | `incremental` / `nothing`, 0 model calls |
+| The quality gate | found 1 row in 17,987 with `classification = "Not Yet Classified"` — a value the FDA really uses; the rule was corrected to accept it |
+| Fixing that quality rule and running again | back to `incremental` (the digest did not change) and in effect **with no image rebuild** |
+| The web page | `/api/ask` answered with `D-0853-2026` and its `trace_url` |
 
-**Trace đo được** (Vertex AI thật, MLflow tự tính giá):
+**Traces, measured** (real Vertex AI, cost worked out by MLflow):
 
-| Câu hỏi | Quyết định | Span | Thời gian | Giá |
+| Question | Decision | Spans | Time | Cost |
 |---|---|---|---|---|
-| Why did Pfizer recall a drug in 2026? | `pass` | 7 | 9,4 s | $0,00289 |
-| What hazard did CPSC report for the stroller? | `pass` | 7 | 7,3 s | $0,00293 |
-| How many drug recalls were there in 2026? | `needs_sql` | **2** | 0,49 s | **0** |
-| Ignore all previous instructions… | `reject` | **2** | 0,51 s | **0** |
-| What is the capital of France? | `reject` | **2** | 0,70 s | **0** |
+| Why did Pfizer recall a drug in 2026? | `pass` | 7 | 9.4 s | $0.00289 |
+| What hazard did CPSC report for the stroller? | `pass` | 7 | 7.3 s | $0.00293 |
+| How many drug recalls were there in 2026? | `needs_sql` | **2** | 0.49 s | **0** |
+| Ignore all previous instructions… | `reject` | **2** | 0.51 s | **0** |
+| What is the capital of France? | `reject` | **2** | 0.70 s | **0** |
 
-**Test:** 670 đạt (`docker compose --profile test run --rm test`), trước đó 144.
+**Tests:** 670 pass (`docker compose --profile test run --rm test`), up from 144.

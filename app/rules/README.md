@@ -1,67 +1,70 @@
-# rules/ — khai báo nghiệp vụ
+# rules/ — the declarations
 
-Thư mục này là nơi **duy nhất** mô tả một loại tài liệu và các luật áp lên nó. Không có SQL hay
-formatter nào trong Python nữa: `crawlerrag/rules/` đọc các file ở đây, sinh câu SELECT, dựng tài liệu
-và kiểm tra chất lượng.
+This directory is the **only** place a document type and the rules over it are described. No SQL and
+no formatting is left in Python: `crawlerrag/rules/` reads these files, generates the SELECT, builds
+the documents and runs the quality checks.
 
 ```
 rules/
-  catalog.yaml        schema nào trong Postgres của crawler được rút metadata
-  qualify.yaml        cổng chặn câu hỏi của người dùng, trước khi gọi model
+  catalog.yaml        which schemas in the crawler's Postgres the metadata is read from
+  qualify.yaml        the gate in front of the model, applied to the user's question
   doc_types/
-    drug_recall.yaml  một file cho một loại tài liệu (tên file = doc_type)
+    drug_recall.yaml  one file per document type (the file name is the doc_type)
     cpsc_recall.yaml
 ```
 
-Sửa file ở đây rồi chạy `rules-check` để đối chiếu với metadata rút từ Postgres; sai tên bảng hay tên
-cột là lỗi, thiếu quan hệ cha–con chỉ là cảnh báo. Không cần sửa Python, không cần build lại image
-(thư mục được mount vào container).
+Edit a file here and run `rules-check` to compare it against the metadata read from Postgres: a wrong
+table or column name is an error, a missing parent-child relationship is only a warning. No Python to
+change, and no image to rebuild - the directory is mounted into the container.
 
-## Một doc type gồm những gì
+## What a doc type holds
 
-| Khối | Việc |
+| Block | What it does |
 |---|---|
-| `source` | bảng cha, khoá (phải bằng `crawl.record_change.record_key`), cột soft-delete, `source_id` của crawler |
-| `children` | mỗi mục là một `array_agg` tương quan trên một bảng con |
-| `title`, `body`, `url`, `metadata` | văn bản và filter của tài liệu |
-| `scd2` | thuộc tính nào đổi thì tạo version mới, thuộc tính nào ghi đè tại chỗ |
-| `quality` | luật kiểm tra dòng đã rút, chạy **trước** khi ghi |
+| `source` | the parent table, the key (which must equal `crawl.record_change.record_key`), the soft-delete column, the crawler's `source_id` |
+| `children` | each entry is one correlated `array_agg` over a child table |
+| `title`, `body`, `url`, `metadata` | the document's text and its filters |
+| `scd2` | which attributes open a new version when they change, and which are overwritten in place |
+| `quality` | checks on the extracted rows, run **before** anything is written |
 
-## Ngôn ngữ giá trị
+## The value language
 
-Một *value spec* là một trong:
+A *value spec* is one of:
 
-| Khoá | Nghĩa |
+| Key | Meaning |
 |---|---|
-| `field: col` | một cột cha hoặc một alias trong `children` |
-| `join: [a, b]` | nối các giá trị không rỗng bằng `separator` (mặc định `", "`) |
-| `template: "...{col}..."` | điền cột vào mẫu; **rỗng nếu bất kỳ cột nào rỗng** |
-| `coalesce: [spec, spec]` | spec đầu tiên dựng ra chuỗi không rỗng |
-| `const: "chữ"` | hằng |
+| `field: col` | a parent column, or an alias from `children` |
+| `join: [a, b]` | the non-empty values joined by `separator` (default `", "`) |
+| `template: "...{col}..."` | columns filled into a pattern; **empty if any column is empty** |
+| `coalesce: [spec, spec]` | the first spec that renders a non-empty string |
+| `const: "text"` | a constant |
 
-Thêm `format:` là `iso` (ngày), `year` (số năm), hoặc `thousands` (`1,234,567`; 0 và NULL thành rỗng).
+Add `format:` as `iso` (a date), `year` (the year as a number), or `thousands` (`1,234,567`; 0 and
+NULL render as empty).
 
-Mẹo quan trọng: `template` trả về rỗng khi thiếu cột, nên `coalesce` các `template` chính là cách
-diễn đạt "nếu không có thì dùng cái này".
+The trick worth knowing: `template` renders empty when a column is missing, so a `coalesce` of
+`template`s is how you say "and if that is not there, use this instead".
 
-## Hai điều phải giữ
+## Two things to keep in mind
 
-1. **Văn bản không được đổi vô ý.** `tests/test_rules_build.py` so từng byte với builder Python cũ.
-   Đổi một nhãn trong `body` là đổi `content_hash` của mọi tài liệu → lần `ingest` sau cắt chunk lại
-   toàn bộ. Chunk nào có text y hệt vẫn giữ vector, nhưng text mới thì phải nhúng lại và **mất tiền**.
-2. **`version:`** chỉ cần tăng khi bạn *muốn* đối chiếu lại toàn bộ. Việc phát hiện thay đổi đã tự
-   động: signature của watermark chứa digest của chính file này, nên sửa YAML là lần chạy sau tự
-   chuyển sang `full`.
+1. **The text must not change by accident.** `tests/test_rules_build.py` compares it byte for byte
+   against the Python builders it replaced. Changing one label in `body` changes the `content_hash`
+   of every document, so the next `ingest` re-chunks all of them. A chunk whose text is identical
+   keeps its vector, but new text has to be embedded again and **that costs money**.
+2. **`version:`** only needs to go up when you *want* a full reconcile. Change detection is already
+   automatic: the watermark signature contains a digest of this file, so editing the YAML makes the
+   next run switch to `full` by itself.
 
-## Luật chất lượng
+## Quality rules
 
-| `rule` | Tham số | Lỗi khi |
+| `rule` | Parameters | Fails when |
 |---|---|---|
-| `not_null` | `column` | có dòng NULL (hoặc list rỗng) |
-| `unique` | `column` | có giá trị trùng |
-| `allowed_values` | `column`, `values` | giá trị không rỗng nằm ngoài danh sách |
-| `max_null_fraction` | `column`, `max` | tỷ lệ NULL vượt ngưỡng |
-| `min_rows` | `min` | số dòng ít hơn ngưỡng (**chỉ áp dụng cho full load**) |
+| `not_null` | `column` | any row is NULL (or an empty list) |
+| `unique` | `column` | a value appears more than once |
+| `allowed_values` | `column`, `values` | a non-empty value is outside the list |
+| `max_null_fraction` | `column`, `max` | the share of NULLs is over the threshold |
+| `min_rows` | `min` | there are fewer rows than the threshold (**full loads only**) |
 
-`severity: error` (mặc định) làm cả lô thất bại và **không** đẩy watermark → lần sau đọc lại đúng cửa
-sổ đó. `severity: warn` chỉ ghi vào `ingest.quality_finding` rồi chạy tiếp.
+`severity: error` (the default) fails the batch and does **not** advance the watermark, so the next
+run reads the same window again. `severity: warn` records the finding in `ingest.quality_finding` and
+carries on.

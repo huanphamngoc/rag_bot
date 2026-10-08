@@ -17,66 +17,68 @@ from crawlerrag.rag.providers import ProviderError
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crawlerrag",
-                                     description="RAG trên dữ liệu của crawler: nạp tăng dần vào pgvector + hỏi đáp")
+                                     description="RAG over the crawler's data: incremental loading into pgvector, and grounded answers")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("migrate", help="tạo/cập nhật schema rag + ingest trong vector DB")
+    sub.add_parser("migrate", help="create or update the rag and ingest schemas in the vector database")
 
-    p = sub.add_parser("init", help="cố định số chiều vector (thăm dò model) + tạo index HNSW")
-    p.add_argument("--force", action="store_true", help="xoá vector cũ khi đổi provider/model")
-    p.add_argument("--dim", type=int, help="ấn định số chiều thay vì thăm dò model")
+    p = sub.add_parser("init", help="fix the vector dimension (by probing the model) and build the HNSW index")
+    p.add_argument("--force", action="store_true", help="drop the existing vectors when the provider or model changes")
+    p.add_argument("--dim", type=int, help="set the dimension instead of probing the model")
 
-    names = "xem rules/doc_types/*.yaml"
-    for name, help_text in (("ingest", "đọc thay đổi từ change log của crawler, dựng tài liệu/chunk rồi nhúng"),
-                            ("plan", "xem trước ingest sẽ làm gì và phải nhúng bao nhiêu ký tự (chỉ đọc)")):
+    names = "see rules/doc_types/*.yaml"
+    for name, help_text in (("ingest", "read changes from the crawler's change log, build documents and chunks, then embed"),
+                            ("plan", "preview what ingest would do and how many characters it would embed (read only)")):
         p = sub.add_parser(name, help=help_text)
-        p.add_argument("doc_types", nargs="*", help=f"mặc định RAG_DOC_TYPES; 'all' = tất cả. Có: {names}")
+        p.add_argument("doc_types", nargs="*", help=f"defaults to RAG_DOC_TYPES; 'all' means every type. Available: {names}")
         p.add_argument("--full", action="store_true",
-                       help="đối chiếu toàn bộ nguồn thay vì chỉ phần thay đổi (chỉ ghi/nhúng phần khác)")
+                       help="reconcile the whole source instead of the changes only (still writes and embeds "
+                            "nothing but the differences)")
         if name == "ingest":
-            p.add_argument("--no-embed", action="store_true", help="chỉ dựng tài liệu/chunk, chưa gọi API nhúng")
-            p.add_argument("--max-chunks", type=int, help="giới hạn số chunk nhúng lần này (kiểm soát chi phí)")
+            p.add_argument("--no-embed", action="store_true", help="build documents and chunks only, without calling the embedding API")
+            p.add_argument("--max-chunks", type=int, help="cap the chunks embedded in this run, to control what it costs")
             p.add_argument("--loop", action="store_true",
-                           help="chạy lặp mỗi INGEST_INTERVAL_S giây (dịch vụ scheduler)")
+                           help="run every INGEST_INTERVAL_S seconds (the scheduler service)")
 
-    p = sub.add_parser("approve", help="trả lời một lần chạy đang chờ duyệt trước bước nhúng")
-    p.add_argument("thread_id", help="in ra ở cuối lần chạy bị dừng")
-    p.add_argument("--no", action="store_true", help="từ chối: không nhúng, chunk vẫn nằm chờ")
+    p = sub.add_parser("approve", help="answer a run that is paused for approval before embedding")
+    p.add_argument("thread_id", help="printed at the end of the run that paused")
+    p.add_argument("--no", action="store_true", help="refuse: embed nothing, leave the chunks pending")
 
-    p = sub.add_parser("embed", help="chỉ nhúng các chunk đang chờ")
+    p = sub.add_parser("embed", help="embed the pending chunks and nothing else")
     p.add_argument("--max-chunks", type=int)
 
-    p = sub.add_parser("status", help="index, watermark so với nguồn, các batch gần đây")
-    p.add_argument("--limit", type=int, default=10, help="số batch gần nhất")
+    p = sub.add_parser("status", help="the index, the watermark against the source, and recent batches")
+    p.add_argument("--limit", type=int, default=10, help="how many recent batches to show")
 
-    p = sub.add_parser("catalog", help="rút metadata (bảng, cột, quan hệ) từ Postgres của crawler")
-    p.add_argument("--export", metavar="FILE", help="ghi thêm ra file YAML để xem lại")
+    p = sub.add_parser("catalog", help="read the metadata (tables, columns, relationships) out of the "
+                                      "crawler's Postgres")
+    p.add_argument("--export", metavar="FILE", help="also write it to a YAML file to read through")
 
-    p = sub.add_parser("rules-check", help="đối chiếu rules/*.yaml với metadata đã rút")
-    p.add_argument("--refresh", action="store_true", help="rút metadata mới thay vì dùng bản đã lưu")
+    p = sub.add_parser("rules-check", help="check rules/*.yaml against the metadata that was read")
+    p.add_argument("--refresh", action="store_true", help="read the metadata again instead of using the stored copy")
 
-    p = sub.add_parser("history", help="các version của một tài liệu (SCD Type 2)")
-    p.add_argument("doc_id", help='ví dụ "drug_recall:D-0853-2026"')
+    p = sub.add_parser("history", help="every version of one document (SCD Type 2)")
+    p.add_argument("doc_id", help='for example "drug_recall:D-0853-2026"')
 
-    p = sub.add_parser("qualify", help="xem cổng chặn quyết định gì với một câu hỏi (không gọi model)")
+    p = sub.add_parser("qualify", help="show what the gate decides about a question, calling no model")
     p.add_argument("question", nargs="+")
     p.add_argument("--filter", action="append", metavar="KEY=VALUE")
-    p.add_argument("--follow-up", action="store_true", help="coi như câu hỏi tiếp nối trong hội thoại")
+    p.add_argument("--follow-up", action="store_true", help="judge it as a follow-up inside a conversation")
 
-    for name, help_text in (("search", "chỉ truy hồi, không gọi LLM"),
-                            ("ask", "truy hồi rồi để LLM trả lời có dẫn nguồn")):
+    for name, help_text in (("search", "retrieve only, with no LLM call"),
+                            ("ask", "retrieve, then have the LLM answer with its sources")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("question", nargs="+")
-        p.add_argument("--doc-types", help="giới hạn loại tài liệu, vd 'cpsc_recall,drug_recall'")
+        p.add_argument("--doc-types", help="limit the document types, e.g. 'cpsc_recall,drug_recall'")
         p.add_argument("--top-k", type=int)
         p.add_argument("--candidates", type=int)
-        p.add_argument("--filter", action="append", metavar="KEY=VALUE", help="lọc metadata, vd --filter year=2024")
-        p.add_argument("--full", action="store_true", help="in trọn nội dung đoạn")
+        p.add_argument("--filter", action="append", metavar="KEY=VALUE", help="filter on metadata, e.g. --filter year=2024")
+        p.add_argument("--full", action="store_true", help="print each excerpt in full")
         p.add_argument("--show-sources", action="store_true")
         if name == "ask":
             p.add_argument("--conversation", metavar="ID|new")
 
-    p = sub.add_parser("chat", help="hỏi đáp nhiều lượt (gõ /exit để thoát)")
+    p = sub.add_parser("chat", help="a multi-turn conversation (type /exit to leave)")
     p.add_argument("--conversation", metavar="ID")
     p.add_argument("--doc-types")
     p.add_argument("--top-k", type=int)
@@ -84,10 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--filter", action="append", metavar="KEY=VALUE")
     p.add_argument("--verbose", action="store_true")
 
-    p = sub.add_parser("conversations", help="các hội thoại gần đây")
+    p = sub.add_parser("conversations", help="recent conversations")
     p.add_argument("--limit", type=int, default=20)
 
-    p = sub.add_parser("feedback", help="chấm điểm một câu trả lời lên trace MLflow của nó")
+    p = sub.add_parser("feedback", help="score one answer onto its MLflow trace")
     p.add_argument("query_id", type=int)
     p.add_argument("verdict", choices=("good", "bad"))
     p.add_argument("--comment")

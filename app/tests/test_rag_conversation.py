@@ -301,7 +301,7 @@ def test_questions_block_numbers_questions_without_answers():
 
 # ---------------------------------------------------------------- CLI
 def test_ask_rejects_an_unknown_conversation_id():
-    with pytest.raises(ValueError, match="không có hội thoại"):
+    with pytest.raises(ValueError, match="no conversation"):
         commands._resolve_conversation(FakeDB(), "6f1c0000-0000-0000-0000-000000000000")
 
 
@@ -319,9 +319,9 @@ def test_chat_loop_answers_keeps_context_and_handles_commands(monkeypatch, capsy
 
     assert commands._chat(settings, db, args) == 0
     out = capsys.readouterr().out
-    assert "(tìm với: Why did Cantrell Drug Company recall hydromorphone?)" in out
-    assert "[1] Bạn: Which drugs did Cantrell Drug Company recall?" in out      # /history
-    assert "Hội thoại mới" in out                                                # /new
+    assert "(searched as: Why did Cantrell Drug Company recall hydromorphone?)" in out
+    assert "[1] You: Which drugs did Cantrell Drug Company recall?" in out      # /history
+    assert "New conversation" in out                                             # /new
     assert len(db.conversations) == 2
     assert [r["turn"] for r in db.log] == [1, 2]
 
@@ -338,4 +338,4 @@ def test_chat_survives_ctrl_d(monkeypatch, capsys):
     args = SimpleNamespace(conversation=None, doc_types=None, filter=None, top_k=None, candidates=None,
                            verbose=True)
     assert commands._chat(SimpleNamespace(rag_doc_types=None), db, args) == 0
-    assert "Tiếp tục sau: crawlerrag chat --conversation" in capsys.readouterr().out
+    assert "Continue later: crawlerrag chat --conversation" in capsys.readouterr().out
