@@ -617,6 +617,41 @@ follow-ups, so a question about sales asked as a later turn lands on `sql_reques
 which is why the `sql_request` message **itself** states that there is no sales, revenue, inventory or customer
 data. Handing over a schema without saying what is missing would answer the wrong question all over again.
 
+#### Showing the sources the answer actually used
+
+Retrieval always hands the model `RAG_TOP_K` excerpts, and the answer usually leans on one of them.
+Measured over 14 real answers in `rag.query_log`:
+
+| Sources cited | Answers |
+|---|---|
+| 1 | 7 |
+| 0 | 3 |
+| 2 | 1 |
+| 6 | 1 |
+| 8 | 2 |
+
+Eight were retrieved every time. Listing all eight asks the reader to scan seven records the answer
+never used — and the reported case was exactly that: *"What hazard did CPSC report for Hi-Lift Storage
+Hoists?"* cited `[1]` and listed eight, the other seven being ceiling hoists, pool lifts and scuba
+gear.
+
+So the list shows what was cited and folds the rest into a `<details>`, and the CLI prints the cited
+ones with a line saying how many more there were. They are **never dropped**: the retrieved set is how
+a wrong answer gets explained, and the payload still carries all of them with a `cited` flag.
+
+Three details that decide whether this is right or merely shorter:
+
+- **The numbering must not move.** The answer says `[3]`, so the item must still read 3 once the two
+  before it are folded away — the `<li>` carries `value: s.n`. A cited source is always in the visible
+  list, so no citation link ever points into the collapsed group.
+- **An answer that cites nothing marks everything.** 3 of the 14 measured answers cited no source at
+  all; showing an empty list beside them would hide the only evidence there is.
+- **A citation past the end is ignored.** The model occasionally writes `[9]` when 8 excerpts were
+  given; on its own that marks nothing, so the answer falls back to showing all of them.
+
+`cited` is computed server-side (`web._mark_cited`, over `answer.cited`) so the live page, a
+conversation reloaded from the log, and the CLI all agree on one answer.
+
 #### Streaming the answer (SSE)
 
 `POST /api/ask/stream` returns Server-Sent Events: `delta` while the model writes, then **one** `done` carrying
@@ -823,7 +858,7 @@ instant, with no gap.
 Postgres instances in RAM (a minimal copy of the crawler tables, with the column types taken from the crawler
 database's `information_schema`; and a pgvector 0.8.5).
 
-**670 tests pass** (up from 144).
+**686 tests pass** (up from 144).
 
 | Group | Tests |
 |---|---|

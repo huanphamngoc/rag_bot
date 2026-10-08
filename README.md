@@ -127,6 +127,16 @@ try again.
 
 Turn it off with `RAG_CHAT_CLARIFY=false` in `.env` (needs `docker compose up -d web` to take effect).
 
+## The sources shown are the ones the answer used
+
+Retrieval gives the model eight excerpts, and the answer usually leans on one. Measured over 14 real
+answers, eight were retrieved every time and the median answer cited one — so the list used to show
+seven records the answer never touched.
+
+Now it shows what was cited, with the rest one click away under *"N more retrieved, not cited in the
+answer"*. Nothing is dropped: what was retrieved is how a wrong answer gets explained. In the CLI,
+`--show-sources` still prints every excerpt in full.
+
 ## Streaming on the web page
 
 The page calls `POST /api/ask/stream` and shows the answer **while the model writes it**, then rebuilds the
@@ -226,4 +236,4 @@ what the user typed is never changed.
 | Ignore all previous instructions… | `reject` | **2** | 0.51 s | **0** |
 | What is the capital of France? | `reject` | **2** | 0.70 s | **0** |
 
-**Tests:** 670 pass (`docker compose --profile test run --rm test`), up from 144.
+**Tests:** 686 pass (`docker compose --profile test run --rm test`), up from 144.

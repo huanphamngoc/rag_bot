@@ -132,6 +132,10 @@ textarea {
   border: 1px solid var(--border); color: var(--muted); font-family: var(--font);
 }
 .sources details { margin-top: 2px; }
+/* The excerpts that were retrieved but not cited: one click away, and visibly a separate group. */
+.sources details.unused { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.sources details.unused > summary { font-size: .85rem; }
+.sources details.unused ol { margin-top: 8px; opacity: .72; }
 .sources details p { margin: 4px 0 0; color: var(--muted); font-size: .85rem; }
 .stats { color: var(--muted); font-size: .8rem; margin-top: 8px; }
 

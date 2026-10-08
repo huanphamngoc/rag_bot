@@ -494,3 +494,68 @@ def test_the_daily_cap_applies_to_a_correction_too(made, monkeypatch):
     client, conn, _ = made(conn=FakeConn(used=300), monkeypatch=monkeypatch)
     response = client.post("/api/ask", json={"question": "Why did Eli Lilly recall?", "thread_id": THREAD})
     assert response.status_code == 429
+
+# ---------------------------------------------------------------- which sources are shown
+# Retrieval always hands the model RAG_TOP_K excerpts and the answer usually leans on one. Measured
+# over 14 real answers in rag.query_log: 8 retrieved every time, and the answer cited 1 of them seven
+# times, 0 three times, 2 once, 6 once, 8 twice. So the page shows what was cited and folds the rest
+# away - it never drops them, because the retrieved set is how a wrong answer is explained.
+@pytest.mark.parametrize("text, expected", [
+    ("Because of a fire hazard [1].", {1}),
+    ("Two firms were involved [1, 3].", {1, 3}),
+    ("Both say so [2][4].", {2, 4}),
+    ("Spaces are allowed [1 , 2].", {1, 2}),
+    ("No citation at all.", set()),
+    ("", set()),
+    (None, set()),
+])
+def test_cited_reads_the_numbers_out_of_an_answer(text, expected):
+    assert answer.cited(text) == expected
+
+
+@pytest.mark.parametrize("text, count, expected", [
+    ("Only the first [1].", 4, {1}),
+    ("The first and the third [1][3].", 4, {1, 3}),
+    # An answer that cites nothing still rests on what was retrieved; an empty list beside it would
+    # hide the only evidence there is. 3 of the 14 measured answers were like this.
+    ("No citations here.", 4, {1, 2, 3, 4}),
+    (None, 3, {1, 2, 3}),
+    # The model occasionally invents a number past the end. It marks nothing on its own, so the answer
+    # falls back to all of them rather than to an empty list.
+    ("As source [9] says.", 4, {1, 2, 3, 4}),
+    ("Sources [2] and [9].", 4, {2}),
+])
+def test_mark_cited_decides_what_the_page_shows(text, count, expected):
+    assert web._mark_cited(text, count) == expected
+
+
+def _four_hits_citing_one_and_three():
+    return answer.Answer(question="Why was it recalled?", text="A fire hazard [1], and a fall [3].",
+                         hits=[_hit(n) for n in (1, 2, 3, 4)], prompt_tokens=100, output_tokens=20,
+                         duration_ms=900, query_id=11)
+
+
+def test_the_payload_marks_only_the_cited_sources(made, monkeypatch):
+    client, _, _ = made(reply=_four_hits_citing_one_and_three(), monkeypatch=monkeypatch)
+    body = client.post("/api/ask", json={"question": "Why was it recalled?"}).get_json()
+
+    assert [s["n"] for s in body["sources"] if s["cited"]] == [1, 3]
+    assert [s["n"] for s in body["sources"] if not s["cited"]] == [2, 4]
+
+
+def test_the_uncited_sources_are_still_sent(made, monkeypatch):
+    """Folded away on the page, not dropped from the payload."""
+    client, _, _ = made(reply=_four_hits_citing_one_and_three(), monkeypatch=monkeypatch)
+    body = client.post("/api/ask", json={"question": "Why was it recalled?"}).get_json()
+
+    assert [s["n"] for s in body["sources"]] == [1, 2, 3, 4]
+
+
+def test_the_page_folds_the_uncited_ones_away_and_keeps_their_numbers():
+    """`value` on the <li> is what keeps "[3]" pointing at an item that still reads 3 once the two
+    before it are hidden."""
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "s.cited !== false" in script and "s.cited === false" in script
+    assert "value: s.n" in script
+    assert "not cited in the answer" in script
+

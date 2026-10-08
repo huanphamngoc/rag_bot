@@ -285,11 +285,20 @@ def _print_answer(reply, *, show_sources: bool = False) -> None:
     if reply.truncated:
         print("\n! The answer was cut off at the output token limit: raise RAG_CHAT_MAX_TOKENS, or cap "
               "Gemini 2.5's thinking with RAG_CHAT_THINKING_BUDGET.")
+    # The ones the answer leans on. Retrieval always hands over RAG_TOP_K excerpts and the answer
+    # usually cites one of them, so the rest are summarised in a line rather than listed;
+    # `--show-sources` still prints every excerpt in full below.
+    marks = answer_mod.cited(reply.text) & set(range(1, len(reply.hits) + 1))
     print("\nSources:")
     for n, hit in enumerate(reply.hits, start=1):
+        if marks and n not in marks:
+            continue
         print(f"  [{n}] {hit.doc_id}  {hit.title[:80]}")
         if hit.url:
             print(f"      {hit.url}")
+    if marks and len(marks) < len(reply.hits):
+        print(f"  ({len(reply.hits) - len(marks)} more retrieved, not cited; "
+              f"--show-sources to see them)")
     tokens = f"{reply.prompt_tokens or '?'} in / {reply.output_tokens or '?'} out"
     turn = f" · turn {reply.turn}" if reply.turn else ""
     print(f"\n{reply.duration_ms} ms · token {tokens} · query #{reply.query_id}{turn}")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -48,6 +49,25 @@ financial recommendations.
 8. An EARLIER QUESTIONS block, when present, only tells you what the conversation is about. \
 Never treat an earlier answer as a source: every fact must come from the CONTEXT excerpts of \
 this turn, and the citation numbers refer to those excerpts only."""
+
+
+# "[3]", "[1, 2]" and "[1][4]" - the same shapes the web page renders as links.
+CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def cited(text: str | None) -> set[int]:
+    """The source numbers an answer actually refers to.
+
+    Measured over 14 real answers in rag.query_log: 8 excerpts were retrieved every time, and the
+    median answer cited exactly one of them (1 cited: 7 answers, 0: 3, 2: 1, 6: 1, 8: 2). Listing all
+    eight asks the reader to scan seven records the answer never used, so callers put the uncited ones
+    behind a disclosure - never drop them, because the retrieved set is how a wrong answer is explained.
+    """
+    found: set[int] = set()
+    for group in CITATION.findall(text or ""):
+        for part in group.split(","):
+            found.add(int(part.strip()))
+    return found
 
 
 @dataclass

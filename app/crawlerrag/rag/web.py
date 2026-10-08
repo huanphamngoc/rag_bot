@@ -72,11 +72,21 @@ def _safe_url(url: str | None) -> str | None:
     return url if url and url.startswith(("https://", "http://")) else None
 
 
-def _source(n: int, hit) -> dict[str, Any]:
+def _source(n: int, hit, *, cited: bool = True) -> dict[str, Any]:
     text = " ".join((hit.text or "").split())
     return {"n": n, "doc_id": hit.doc_id, "doc_type": hit.doc_type, "title": hit.title, "url": _safe_url(hit.url),
-            "matched_by": hit.matched_by, "score": round(hit.score, 4),
+            "matched_by": hit.matched_by, "score": round(hit.score, 4), "cited": cited,
             "snippet": text if len(text) <= SNIPPET_CHARS else text[:SNIPPET_CHARS].rstrip() + " ..."}
+
+
+def _mark_cited(text: str | None, count: int) -> set[int]:
+    """Which of ``count`` sources the answer refers to - all of them when it refers to none.
+
+    An answer that cites nothing still rests on what was retrieved, and showing an empty source list
+    beside it would hide the only evidence there is. 3 of 14 measured answers were like that.
+    """
+    marks = answer_mod.cited(text) & set(range(1, count + 1))
+    return marks or set(range(1, count + 1))
 
 
 def parse_ask(payload: Any, indexed: set[str]) -> dict[str, Any]:
@@ -142,20 +152,26 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def turn_sources(conn: psycopg.Connection, retrieved: list[dict]) -> list[dict]:
-    """Rebuild a past turn's source list from the doc ids stored in rag.query_log.retrieved."""
+def turn_sources(conn: psycopg.Connection, retrieved: list[dict], answer: str | None = None) -> list[dict]:
+    """Rebuild a past turn's source list from the doc ids stored in rag.query_log.retrieved.
+
+    ``answer`` is what marks the cited ones, so a conversation reloaded from the log shows the same
+    short list the live turn showed rather than all eight again.
+    """
     doc_ids = [r["doc_id"] for r in retrieved if r.get("doc_id")]
     if not doc_ids:
         return []
     docs = {r["doc_id"]: r for r in conn.execute(
         "SELECT doc_id, doc_type, title, url FROM rag.document WHERE doc_id = ANY(%s) AND is_current",
         (doc_ids,)).fetchall()}
+    marks = _mark_cited(answer, len(retrieved))
     out = []
     for r in retrieved:
         d = docs.get(r.get("doc_id"))
         out.append({"n": r.get("rank"), "doc_id": r.get("doc_id"), "doc_type": d["doc_type"] if d else None,
                     "title": d["title"] if d else r.get("doc_id"), "url": _safe_url(d["url"]) if d else None,
-                    "matched_by": r.get("matched_by"), "score": r.get("score"), "snippet": None})
+                    "matched_by": r.get("matched_by"), "score": r.get("score"),
+                    "cited": r.get("rank") in marks, "snippet": None})
     return out
 
 
@@ -266,8 +282,12 @@ def create_app(settings=None, *, connect: Callable[[], psycopg.Connection] | Non
                       "query_id": r["query_id"], "duration_ms": r["duration_ms"],
                       "prompt_tokens": r["prompt_tokens"], "output_tokens": r["output_tokens"],
                       "standalone_question": r["standalone_question"],
-                      "sources": turn_sources(conn, r["retrieved"] or [])} for r in rows]
+                      "sources": turn_sources(conn, r["retrieved"] or [], r["answer"])} for r in rows]
         return jsonify(conversation_id=conversation_id, turns=turns)
+
+    def _sources(reply) -> list[dict]:
+        marks = _mark_cited(reply.text, len(reply.hits))
+        return [_source(n, h, cited=n in marks) for n, h in enumerate(reply.hits, start=1)]
 
     def payload(reply) -> dict:
         return {
@@ -277,7 +297,7 @@ def create_app(settings=None, *, connect: Callable[[], psycopg.Connection] | Non
             "conversation_id": reply.conversation_id, "turn": reply.turn,
             "standalone_question": reply.standalone_question, "duration_ms": reply.duration_ms,
             "prompt_tokens": reply.prompt_tokens, "output_tokens": reply.output_tokens,
-            "sources": [_source(n, h) for n, h in enumerate(reply.hits, start=1)],
+            "sources": _sources(reply),
             "trace_url": tracing.trace_url(reply.trace_id) if reply.trace_id else None,
             # Set when the turn is waiting for a better question: what to ask, questions this index can
             # really answer, and the thread to send the correction back on.

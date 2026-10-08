@@ -97,19 +97,36 @@ function renderAnswer(text, anchorPrefix) {
   return frag;
 }
 
+function sourceItem(s, anchorPrefix) {
+  const title = s.url
+    ? el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer" }, s.title || s.doc_id)
+    : el("span", {}, s.title || s.doc_id);
+  // `value` keeps the printed number equal to s.n: the answer says [5], so the item must read 5 even
+  // when the four before it are folded away.
+  return el("li", { id: `${anchorPrefix}-${s.n}`, value: s.n },
+    title,
+    el("div", { class: "src-meta" }, s.doc_id,
+      s.matched_by ? el("span", { class: "badge", title: "Which retriever found it" }, MATCHED[s.matched_by] || s.matched_by) : null),
+    s.snippet ? el("details", {}, el("summary", {}, "Excerpt given to the model"), el("p", {}, s.snippet)) : null);
+}
+
+// Retrieval always hands the model RAG_TOP_K excerpts, and the answer usually leans on one of them:
+// measured over 14 real answers, 8 were retrieved every time and the median answer cited one. So the
+// list shows what was cited, and keeps the rest one click away - the retrieved set is how a wrong
+// answer gets explained, so it is never dropped. `cited` is computed server-side (web.py) so the page,
+// a reloaded conversation and the CLI all agree.
 function renderSources(sources, anchorPrefix) {
   if (!sources || !sources.length) return null;
-  const items = sources.map((s) => {
-    const title = s.url
-      ? el("a", { href: s.url, target: "_blank", rel: "noopener noreferrer" }, s.title || s.doc_id)
-      : el("span", {}, s.title || s.doc_id);
-    return el("li", { id: `${anchorPrefix}-${s.n}` },
-      title,
-      el("div", { class: "src-meta" }, s.doc_id,
-        s.matched_by ? el("span", { class: "badge", title: "Which retriever found it" }, MATCHED[s.matched_by] || s.matched_by) : null),
-      s.snippet ? el("details", {}, el("summary", {}, "Excerpt given to the model"), el("p", {}, s.snippet)) : null);
-  });
-  return el("div", { class: "sources" }, el("h3", {}, "Sources"), el("ol", {}, items));
+  const used = sources.filter((s) => s.cited !== false);
+  const rest = sources.filter((s) => s.cited === false);
+  const box = el("div", { class: "sources" }, el("h3", {}, "Sources"),
+                 el("ol", {}, used.map((s) => sourceItem(s, anchorPrefix))));
+  if (rest.length) {
+    box.append(el("details", { class: "unused" },
+      el("summary", {}, `${rest.length} more retrieved, not cited in the answer`),
+      el("ol", {}, rest.map((s) => sourceItem(s, anchorPrefix)))));
+  }
+  return box;
 }
 
 function stats(r) {
