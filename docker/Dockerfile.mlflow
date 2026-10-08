@@ -1,0 +1,39 @@
+# Self-hosted MLflow tracking server for the RAG traces (docker compose --profile mlflow up -d).
+# Apache-2.0, runs next to this project's own Postgres; nothing is sent to a third party:
+#   * MLFLOW_DISABLE_TELEMETRY - MLflow otherwise reports usage to mlflow-telemetry.io (server and UI);
+#   * MLFLOW_MODEL_CATALOG_URI empty - the server prices LLM spans from the price list bundled in this
+#     version instead of downloading the latest one from GitHub on first use.
+# The full `mlflow` package is needed for the server and UI (~940 MB with its numpy/pandas/sklearn
+# dependencies); the app image only carries the light mlflow-tracing client.
+#
+# Same arrangement as the crawler project's deploy/docker/Dockerfile.mlflow, which has been running this
+# version against a Postgres backend; the version is pinned to the mlflow-tracing client in
+# app/requirements.txt so the client speaks the server's protocol.
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=UTC \
+    MLFLOW_DISABLE_TELEMETRY=true \
+    DO_NOT_TRACK=true \
+    MLFLOW_MODEL_CATALOG_URI=
+
+# SQLAlchemy 2.1 (pulled in by mlflow 3.16) maps postgresql:// to psycopg 3, not psycopg2; the same
+# psycopg version the app pins.
+RUN pip install mlflow==3.16.1 "psycopg[binary]==3.2.3"
+
+RUN useradd --create-home --uid 10001 mlflow \
+ && mkdir -p /mlflow/artifacts \
+ && chown -R mlflow:mlflow /mlflow
+USER mlflow
+WORKDIR /mlflow
+
+EXPOSE 5000
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=6 \
+  CMD python -c "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=4).status != 200)"
+
+# Options come from MLFLOW_* environment variables set in docker-compose.yml.
+CMD ["mlflow", "server"]

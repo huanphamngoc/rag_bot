@@ -1,0 +1,295 @@
+# The gate in front of the model: the first node of the chat graph.
+#
+# Every question costs a paid embedding call plus a paid chat call, so the questions that cannot be
+# answered well by retrieval are answered here, for free, with no model involved. Rules are evaluated
+# top to bottom and the FIRST match decides - the order below is part of the behaviour.
+#
+# Matching is plain lowercase substring matching, on purpose: a rule that a reader cannot evaluate in
+# their head is a rule nobody will dare to change.
+version: 1
+
+limits:
+  min_chars: 3
+  min_words: 2              # "insulin" is a subject, not a question -> clarify, with real examples
+  max_chars: 2000
+  max_filters: 5
+  max_doc_types: 6
+  message_too_short: >-
+    Could you give me a bit more to go on? Name the product, the firm, the recall number or the hazard
+    you are interested in.
+  message_too_vague: >-
+    That is a subject, not a question yet. Here is what the records actually say about it - pick one, or
+    ask your own question about it.
+  message_too_long: >-
+    That question is longer than this interface accepts. Please shorten it to the essentials.
+  message_too_many_filters: >-
+    Too many filters at once. Use at most five.
+
+rules:
+  # 1. Requests for help doing harm. Refused outright - no examples, no "try rephrasing": inviting
+  #    someone to reword a question about building a weapon is inviting them to try again. This is the
+  #    one blocked case that deliberately does NOT offer the clarify step.
+  #    The patterns are narrow on purpose. CPSC recall titles really do contain "Risk of Poisoning",
+  #    "Fire Hazard" and "Explosion Hazard", so a bare "poison" or "explosive" would refuse legitimate
+  #    questions about real recalls.
+  - id: unsafe
+    kind: reject
+    patterns:
+      - how to make a bomb
+      - how to build a bomb
+      - how to design a bomb
+      - make a bomb
+      - build a bomb
+      - design a bomb
+      # Spelled "boom" - how the case was actually reported. Only ever as a phrase: three real recalls
+      # in the index are about Boomboxes and about a firm named Bada Boom Fireworks, so a bare "boom"
+      # would refuse legitimate questions about them.
+      - make a boom
+      - build a boom
+      - design a boom
+      - create a boom
+      - create a bomb
+      - making a bomb
+      - building a bomb
+      - build an explosive device
+      - make explosives at home
+      - how to poison someone
+      - poison someone
+      - how to hurt someone
+      - untraceable weapon
+      - chế tạo bom
+      - cách làm bom
+      - tự chế thuốc nổ
+      - cách đầu độc
+    message: >-
+      I cannot help with that. This interface answers questions about public recall records - FDA drug
+      recalls and CPSC consumer product recalls - and nothing else.
+
+  # 2. "thanks", "ok", "bye" - the end of a conversation, not a question. Answered here for free.
+  #    Without this the rewrite step does what rule 2 of CONDENSE_SYSTEM tells it to and carries the
+  #    subject forward, so "thanks" became "What hazard did CPSC report for Squishy Toys recalled by
+  #    ABC Trading?" and was retrieved and answered in full - a question the user never asked, paid for
+  #    twice. It must NOT be skipped for follow-ups: a closing is only ever a follow-up.
+  #
+  #    `equals_any` matches the WHOLE message, not a substring, and that is load-bearing: "ok" is inside
+  #    "smoke", "token", "broken" and "brokers", so as a pattern it would reject "Which smoke detectors
+  #    were recalled?". Punctuation around the message is ignored, so "thanks!" matches.
+  - id: smalltalk
+    kind: reject
+    equals_any:
+      - thanks
+      - thank you
+      - thanks a lot
+      - thank you very much
+      - thx
+      - ty
+      - ok
+      - okay
+      - okie
+      - got it
+      - understood
+      - nice
+      - great
+      - cool
+      - bye
+      - goodbye
+      - see you
+      # "yes"/"no" are deliberately absent: as a whole message they are an answer to something, not a
+      # closing, and "You're welcome" is the wrong thing to say back to them.
+      - cảm ơn
+      - cám ơn
+      - cảm ơn bạn
+      - cảm ơn nhé
+      - ok nhé
+      - được rồi
+      - hiểu rồi
+      - tạm biệt
+    message: >-
+      You're welcome. Ask another question about a recall whenever you like - a product, a firm, a
+      recall number or a hazard.
+
+  # 3. Attempts to talk to the system rather than to the data.
+  - id: injection
+    kind: reject
+    patterns:
+      - ignore previous instructions
+      - ignore all previous instructions
+      - ignore the above
+      - disregard previous instructions
+      - disregard the above
+      - system prompt
+      - reveal your instructions
+      - repeat your instructions
+      - print your instructions
+      - bỏ qua hướng dẫn
+      - bỏ qua các hướng dẫn
+      - bỏ qua chỉ dẫn
+      - prompt hệ thống
+    message: >-
+      I only answer questions about the recall records in this database.
+
+  # 4. Public records are not advice. The answering prompt says so too; this stops the call entirely.
+  - id: advice
+    kind: reject
+    patterns:
+      - should i take
+      - should i keep taking
+      - should i stop taking
+      - is it safe to take
+      - is it safe for me
+      - prescribe me
+      - diagnose me
+      - tôi có nên
+      - có nên dùng
+      - có nên uống
+    message: >-
+      These are public regulatory records, and I cannot give medical, legal or financial advice. Ask your
+      pharmacist or doctor about a specific medicine. I can tell you what a recall notice itself says.
+
+  # 5. Plainly outside the data. Checked BEFORE `aggregate`, because a question can match both and
+  #    the first match wins: "give me query to get top 5 sales at march" matches `aggregate` on "top 5"
+  #    and used to be answered with a SQL example about drug recalls - confident, irrelevant, and about
+  #    data this database does not hold. Scope comes first; counting only matters once the subject is
+  #    something that is actually here.
+  #    Skipped for follow-ups: "and the second one?" names nothing in scope, and the rewrite step
+  #    resolves it before retrieval.
+  - id: off_topic
+    kind: reject
+    skip_for_follow_up: true
+    require_any:
+      - recall
+      - fda
+      - cpsc
+      - ndc
+      - drug
+      - medicine
+      - medication
+      - injection
+      - tablet
+      - hazard
+      - injur
+      - remedy
+      - refund
+      - firm
+      - manufacturer
+      - retailer
+      - product
+      - consumer
+      - lot
+      - sterility
+      - contamina
+      - thu hồi
+      - thuốc
+      - sản phẩm
+      - nguy hiểm
+      - công ty
+      # "hãng" was here and had to go: matching folds diacritics away, so it also matched "hàng" -
+      # "tổng số đơn hàng tháng ba là bao nhiêu?" (a question about orders, which this database has
+      # nothing to do with) came out in scope. Real questions about a firm say "thu hồi", "thuốc" or
+      # "sản phẩm" as well, so nothing answerable is lost.
+      - cảnh báo
+      - bồi thường
+    message: |-
+      This database holds two kinds of public record, and nothing else: FDA drug recalls and CPSC
+      consumer product recalls. There is no sales, revenue, inventory or customer data in it.
+
+      Questions it can answer, as written:
+        - Why was recall D-0853-2026 issued?
+        - What hazard did CPSC report for the Galanz refrigerators?
+        - Which drugs did Pfizer recall in 2026?
+        - Thuốc nào bị FDA thu hồi vì không đảm bảo vô trùng?
+
+  # 6. "write me a query". Retrieval cannot answer it - the excerpts are recall text, not a schema, so
+  #    the model said "I would need information about the database schema" after paying for 8 excerpts.
+  #    The schema is known and fixed, so it is given here for free instead. Checked before `aggregate`
+  #    because a request for SQL to count is still a request for SQL, and this answer covers both.
+  #    Every column and metadata key below was read off the live database, not remembered.
+  - id: sql_request
+    kind: needs_sql
+    patterns:
+      - write query
+      - write a query
+      - write me a query
+      - write sql
+      - write a sql
+      - give me a query
+      - give me query
+      - give me the sql
+      - show me the query
+      - sql query
+      - sql statement
+      - select statement
+      - viết query
+      - viết câu query
+      - viết câu lệnh sql
+      - câu lệnh sql
+      - cho tôi query
+    message: |-
+      This database holds two kinds of public record and nothing else: FDA drug recalls and CPSC
+      consumer product recalls. There is no sales, revenue, inventory or customer data to query.
+
+      Here is the schema for what is here. Both recall types live in one table, so `doc_type` is the
+      filter that separates them, and the type-specific fields are keys in the `metadata` jsonb column.
+
+      rag.document
+        doc_id, doc_type ('drug_recall' | 'cpsc_recall'), title, body, url, metadata (jsonb)
+        is_current, is_active   -- always filter on both: the table keeps every version (SCD2)
+
+      metadata keys, measured:
+        both         recall_number, recall_date (text), year (number)
+        drug_recall  classification, status, state, country, product_type, event_id
+        cpsc_recall  recall_id, units_total_approx (number)
+    sql_hint: |
+      SELECT d.doc_id,
+             d.title,
+             d.metadata->>'recall_number' AS recall_number,
+             d.metadata->>'recall_date'   AS recall_date,
+             d.metadata->>'classification' AS classification,
+             d.url
+        FROM rag.document d
+       WHERE d.doc_type = 'drug_recall'
+         AND d.is_current AND d.is_active
+         AND d.metadata->>'year' = '2026'
+       ORDER BY d.metadata->>'recall_date' DESC NULLS LAST
+       LIMIT 50;
+
+  # 7. Counts, totals, averages and rankings. Retrieval reads at most RAG_TOP_K excerpts, so an answer
+  #    built from them would be a guess about the whole dataset. SQL is the right tool and it is free.
+  #    Reached only once `off_topic` has agreed the subject is in this database.
+  - id: aggregate
+    kind: needs_sql
+    patterns:
+      - how many
+      - how much in total
+      - total number
+      - count of
+      - number of recalls
+      - average
+      - median
+      - percentage of
+      - what fraction
+      - most common
+      - least common
+      - top 5
+      - top 10
+      - ranked by
+      - bao nhiêu
+      - tổng số
+      - trung bình
+      - nhiều nhất
+      - ít nhất
+    message: |-
+      Retrieval reads only a handful of matching excerpts, so it cannot count across the whole database.
+      That is a SQL question. The shape below is a starting point, not an answer to what you asked -
+      change the filter and the GROUP BY to match it.
+
+      Columns you can group or filter by, in rag.document.metadata:
+        both types  - recall_number (text), recall_date (text), year (number)
+        drug_recall - classification, status, state, country, product_type, event_id
+        cpsc_recall - recall_id, units_total_approx (number)
+    sql_hint: |
+      SELECT metadata->>'year' AS year, count(*) AS recalls
+        FROM rag.document
+       WHERE doc_type = 'drug_recall' AND is_current AND is_active
+       GROUP BY 1 ORDER BY 1;
+    # Then ask me about any individual record the query points at.

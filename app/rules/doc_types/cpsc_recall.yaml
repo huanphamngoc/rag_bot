@@ -1,0 +1,118 @@
+# CPSC consumer product recalls, crawler source `cpsc_recall`: one parent row plus six child tables.
+#
+# The crawler rewrites every child table in the same transaction as the parent row, so a change to a
+# hazard or a retailer is logged as a change of the recall - which is what lets the incremental load
+# read only the parent keys. Byte-for-byte identical to the Python builder it replaced.
+doc_type: cpsc_recall
+version: 1
+
+source:
+  source_id: cpsc_recall
+  schema: retail
+  table: cpsc_recall
+  key: recall_id
+  active_column: is_active
+  order_by: recall_id
+
+children:
+  hazards:
+    schema: retail
+    table: cpsc_recall_hazard
+    join: {recall_id: recall_id}
+    select: description
+    order_by: seq
+  hazard_types:
+    schema: retail
+    table: cpsc_recall_hazard
+    join: {recall_id: recall_id}
+    select: hazard_type
+    distinct: true
+  products:
+    schema: retail
+    table: cpsc_recall_product
+    join: {recall_id: recall_id}
+    select: name
+    order_by: seq
+  product_types:
+    schema: retail
+    table: cpsc_recall_product
+    join: {recall_id: recall_id}
+    select: product_type
+    distinct: true
+  manufacturers:
+    schema: retail
+    table: cpsc_recall_company
+    join: {recall_id: recall_id}
+    select: name
+    order_by: seq
+    where: {column: role, eq: Manufacturer}
+  other_companies:
+    schema: retail
+    table: cpsc_recall_company
+    join: {recall_id: recall_id}
+    select: name
+    order_by: seq
+    where: {column: role, ne: Manufacturer}
+  retailers:
+    schema: retail
+    table: cpsc_recall_major_retailer
+    join: {recall_id: recall_id}
+    select: retailer
+    order_by: retailer
+  remedy_options:
+    schema: retail
+    table: cpsc_recall_remedy_option
+    join: {recall_id: recall_id}
+    select: option
+    order_by: seq
+  countries:
+    schema: retail
+    table: cpsc_recall_country
+    join: {recall_id: recall_id}
+    select: country
+    order_by: seq
+
+# The CPSC title is the headline; fall back to the recall number, then to the id.
+title:
+  coalesce:
+    - {template: "CPSC consumer product recall: {title}"}
+    - {template: "CPSC consumer product recall: CPSC recall {recall_number}"}
+    - {template: "CPSC consumer product recall: CPSC recall {recall_id}"}
+
+body:
+  - {label: Recall number, value: {field: recall_number}}
+  - {label: Recall date, value: {field: recall_date, format: iso}}
+  - {label: Description, value: {field: description}}
+  - {label: Products recalled, value: {field: products}}
+  - {label: Product type, value: {field: product_types}}
+  - {label: Hazard, value: {field: hazards}}
+  - {label: Hazard type, value: {field: hazard_types}}
+  - {label: Reported injuries, value: {field: injuries}}
+  - {label: Remedy, value: {field: remedies}}
+  - {label: Remedy options, value: {field: remedy_options}}
+  - {label: Manufacturer, value: {field: manufacturers}}
+  - {label: Other companies involved, value: {field: other_companies}}
+  - {label: Sold at, value: {field: retailers}}
+  - {label: Manufactured in, value: {field: countries}}
+  - {label: Units affected (approximate), value: {field: units_total_approx, format: thousands}}
+
+url: {field: url}
+
+metadata:
+  recall_id: {field: recall_id}
+  recall_number: {field: recall_number}
+  recall_date: {field: recall_date, format: iso}
+  year: {field: recall_date, format: year}
+  hazard_types: {field: hazard_types}
+  units_total_approx: {field: units_total_approx}
+
+scd2:
+  track: [title, body]
+  overwrite: [url, metadata]
+  version_on_activation_change: true
+
+quality:
+  - {rule: not_null, column: recall_id}
+  - {rule: unique, column: recall_id}
+  - {rule: not_null, column: title, severity: warn}
+  - {rule: max_null_fraction, column: description, max: 0.5, severity: warn}

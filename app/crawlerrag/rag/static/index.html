@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recall Chatbot</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-row">
+      <div>
+        <h1>Recall Chatbot</h1>
+        <p class="sub">Answers from public FDA and CPSC recall records. Every claim cites a numbered source.</p>
+      </div>
+      <button id="new-chat" type="button" class="ghost">New chat</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="scope" aria-label="Search scope">
+      <fieldset id="doc-types">
+        <legend>Search in</legend>
+      </fieldset>
+      <details id="filters-box">
+        <summary>Filters</summary>
+        <label for="filters">One <code>key=value</code> per line. Drug recalls: classification, status, state,
+          product_type, year, recall_number. Product recalls: year, recall_number.</label>
+        <textarea id="filters" rows="2" spellcheck="false" placeholder="classification=Class I&#10;year=2024"></textarea>
+      </details>
+    </section>
+
+    <p id="notice" class="notice" hidden></p>
+
+    <section id="empty" class="empty" aria-label="Example questions">
+      <p>Try one of these, or ask your own question in any language:</p>
+      <ul>
+        <li><button type="button" class="example">Which toys were recalled for choking hazards in 2024?</button></li>
+        <li><button type="button" class="example">Why did Cantrell Drug Company recall its products?</button></li>
+        <li><button type="button" class="example">Power banks recalled because of fire or burn risk</button></li>
+      </ul>
+      <p class="hint">Counts, totals and averages need SQL over the full tables; the chatbot only sees the
+        few records it retrieves for each question and will say so.</p>
+    </section>
+
+    <section id="log" class="log" aria-label="Conversation" aria-live="polite"></section>
+  </main>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <div class="wrap composer-row">
+      <label for="question" class="sr-only">Your question</label>
+      <textarea id="question" rows="1" maxlength="2000" placeholder="Ask about a recall..." required></textarea>
+      <button id="send" type="submit">Ask</button>
+    </div>
+    <div class="wrap meta-row">
+      <span id="status" role="status"></span>
+      <span id="usage"></span>
+    </div>
+  </form>
+</body>
+</html>

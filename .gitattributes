@@ -1,0 +1,9 @@
+# Everything in this repository is read by Linux containers, so the working tree keeps LF whatever
+# core.autocrlf says on the machine that cloned it. It matters: docker-compose.yml carries an inline
+# `sh -c` entrypoint for the mlflow database init, and a CRLF there puts a literal \r in the command.
+* text=auto eol=lf
+
+# Never touched.
+*.png binary
+*.jpg binary
+*.gz  binary

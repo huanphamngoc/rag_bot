@@ -1,0 +1,19 @@
+# Which schemas of the crawler's Postgres the metadata extraction reads.
+#
+# `crawlerrag catalog` reads table, column, key and relationship information for these schemas through
+# the read-only role analyst_ro and stores it in meta.* of the vector database. The rule files are then
+# validated against it, so a wrong table or column name is caught before any row is read.
+#
+# crawl  - the change log the incremental load follows (crawl.record_change)
+# drug   - FDA enforcement reports
+# retail - CPSC consumer product recalls
+#
+# The crawler has four more schemas (healthcare, insurance, food, and more of drug); they are not listed
+# because no document type reads them yet. Adding one here only makes it visible to validation.
+schemas: [crawl, drug, retail]
+
+# Tables matching these patterns are skipped: they are big, they change constantly, and nothing in
+# rules/ refers to them.
+exclude:
+  - crawl.http_request_log
+  - crawl.raw_record

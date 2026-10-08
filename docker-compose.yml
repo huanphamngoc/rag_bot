@@ -1,0 +1,192 @@
+name: crawler-rag
+
+# RAG application over the crawler's data (README.md). The crawler's Postgres is the SOURCE, read as the
+# read-only role analyst_ro through the host port it publishes (5433), like E:/Job/crop-lake does.
+# This project owns its own vector database (service vectordb).
+
+x-app: &app
+  build:
+    context: ./app
+  image: crawler-rag:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://${VECTORDB_USER:-rag}:${VECTORDB_PASSWORD:?set VECTORDB_PASSWORD in .env}@vectordb:5432/${VECTORDB_DB:-rag}
+    SOURCE_DATABASE_URL: postgresql://${SOURCE_PG_USER:-analyst_ro}:${SOURCE_PG_PASSWORD:?set SOURCE_PG_PASSWORD in .env}@${SOURCE_PG_HOST:-host.docker.internal}:${SOURCE_PG_PORT:-5433}/${SOURCE_PG_DB:-crawler}
+    # Vertex AI credentials (RAG_*_PROVIDER=vertex): the host's Application Default Credentials, read-only
+    CLOUDSDK_CONFIG: /gcloud
+    # Tracing to the self-hosted MLflow server (profile "mlflow", on when MLFLOW_TRACKING_URI is set).
+    # MLflow reports usage to mlflow-telemetry.io unless told not to; links printed by the CLI must use
+    # the host port, since http://mlflow:5000 only resolves inside this compose network.
+    MLFLOW_DISABLE_TELEMETRY: "true"
+    MLFLOW_UI_URL: ${MLFLOW_UI_URL:-http://localhost:${MLFLOW_HOST_PORT:-5001}}
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - ${GCLOUD_CONFIG:-./docker/gcloud-empty}:/gcloud:ro
+    # Business rules (document types, quality rules, the chat input gate): edited on the host, read by
+    # the container. No rebuild needed; `rules-check` validates them against the crawler's schema.
+    - ./app/rules:/app/rules:ro
+  depends_on:
+    vectordb:
+      condition: service_healthy
+
+services:
+  # Postgres 16 + pgvector 0.8.5 (the pgvector version Cloud SQL for PostgreSQL 16 offers)
+  vectordb:
+    image: pgvector/pgvector:0.8.5-pg16-trixie
+    container_name: crawler-rag-vectordb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${VECTORDB_DB:-rag}
+      POSTGRES_USER: ${VECTORDB_USER:-rag}
+      POSTGRES_PASSWORD: ${VECTORDB_PASSWORD:?set VECTORDB_PASSWORD in .env}
+      TZ: UTC
+    # same memory settings as the crawler's Postgres; maintenance_work_mem is what builds the HNSW index
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
+      -c timezone=UTC
+    ports:
+      - "127.0.0.1:${VECTORDB_HOST_PORT:-5434}:5432"
+    volumes:
+      - vectordata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot commands:  docker compose run --rm app <migrate|init|plan|ingest|embed|status|ask|chat|...>
+  app:
+    <<: *app
+    profiles: ["job"]
+    command: ["--help"]
+
+  # Web chat:  docker compose up -d web      page: http://localhost:8089
+  web:
+    <<: *app
+    container_name: crawler-rag-web
+    restart: unless-stopped
+    entrypoint: ["gunicorn"]
+    command: ["--bind", ":8080", "--workers", "1", "--threads", "8", "--timeout", "0", "--access-logfile", "-",
+              "crawlerrag.rag.web:create_app()"]
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-8089}:8080"
+
+  # Incremental load every INGEST_INTERVAL_S seconds:  docker compose --profile scheduler up -d
+  ingest-scheduler:
+    <<: *app
+    container_name: crawler-rag-ingest
+    profiles: ["scheduler"]
+    restart: unless-stopped
+    command: ["ingest", "--loop"]
+
+  # ---- profile mlflow: tracing of the RAG answers (docs/DESIGN.md 7.3) ----
+  #   docker compose --profile mlflow up -d --build       UI: http://localhost:5001
+  # then MLFLOW_TRACKING_URI=http://mlflow:5000 in .env turns tracing on for ask / chat / the web page.
+  # Traces live in a separate "mlflow" database of the vectordb service above, so they never mix with
+  # rag.* and are not reachable from the app's own role.
+  mlflow-db-init:
+    image: pgvector/pgvector:0.8.5-pg16-trixie      # used only for its psql client
+    container_name: crawler-rag-mlflow-db-init
+    profiles: ["mlflow"]
+    depends_on:
+      vectordb:
+        condition: service_healthy
+    environment:
+      PGHOST: vectordb
+      PGUSER: ${VECTORDB_USER:-rag}
+      PGPASSWORD: ${VECTORDB_PASSWORD:?set VECTORDB_PASSWORD in .env}
+      PGDATABASE: ${VECTORDB_DB:-rag}
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD:-}
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        test -n "$$MLFLOW_DB_PASSWORD" || { echo "MLFLOW_DB_PASSWORD is empty: set it in .env" >&2; exit 1; };
+        exec psql -v ON_ERROR_STOP=1 -v mlflow_password="$$MLFLOW_DB_PASSWORD" -f /init/mlflow-db-init.sql
+    volumes:
+      - ./docker/mlflow-db-init.sql:/init/mlflow-db-init.sql:ro
+    restart: "no"
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mlflow
+    image: crawler-rag-mlflow:3.16.1
+    container_name: crawler-rag-mlflow
+    profiles: ["mlflow"]
+    restart: unless-stopped
+    depends_on:
+      mlflow-db-init:
+        condition: service_completed_successfully
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://mlflow:${MLFLOW_DB_PASSWORD:-}@vectordb:5432/mlflow
+      MLFLOW_ARTIFACTS_DESTINATION: /mlflow/artifacts
+      MLFLOW_HOST: 0.0.0.0
+      MLFLOW_PORT: "5000"
+      # One web worker is enough for one user. The server-side job runner is off: it only serves online
+      # LLM-judge scoring and prompt optimisation, neither used here, and scoring would call a paid API
+      # from the server.
+      MLFLOW_WORKERS: "1"
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+      # Host headers accepted (DNS-rebinding protection): the service name for the app containers,
+      # localhost for the browser and the healthcheck. The port is published on 127.0.0.1 only.
+      MLFLOW_SERVER_ALLOWED_HOSTS: mlflow,mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*
+    ports:
+      # 5000 on the host is taken by the crawler project's own MLflow server.
+      - "127.0.0.1:${MLFLOW_HOST_PORT:-5001}:5000"
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+
+  # ---- integration tests (throwaway databases in RAM):  docker compose --profile test run --rm test ----
+  test-sourcedb:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: crawler
+      POSTGRES_USER: crawler
+      POSTGRES_PASSWORD: crawler
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler -d crawler"]
+      interval: 2s
+      retries: 30
+
+  test-vectordb:
+    image: pgvector/pgvector:0.8.5-pg16-trixie
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 2s
+      retries: 30
+
+  test:
+    build:
+      context: ./app
+    image: crawler-rag:latest
+    profiles: ["test"]
+    entrypoint: ["python", "-m", "pytest"]
+    environment:
+      MLFLOW_DISABLE_TELEMETRY: "true"
+      IT_SOURCE_ADMIN_DSN: postgresql://crawler:crawler@test-sourcedb:5432/crawler
+      IT_SOURCE_RO_DSN: postgresql://analyst_ro:analyst_ro@test-sourcedb:5432/crawler
+      IT_VECTOR_DSN: postgresql://rag:rag@test-vectordb:5432/rag
+    depends_on:
+      test-sourcedb:
+        condition: service_healthy
+      test-vectordb:
+        condition: service_healthy
+
+volumes:
+  vectordata:
+  mlflow-artifacts:

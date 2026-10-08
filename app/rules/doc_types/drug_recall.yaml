@@ -1,0 +1,84 @@
+# FDA enforcement reports (drug recalls), crawler source `openfda_enforcement`.
+#
+# The body is a byte-for-byte reproduction of the Python builder this file replaced
+# (tests/test_rules_build.py proves it), because the content hash of every document in the live index
+# depends on it.
+doc_type: drug_recall
+version: 1
+
+source:
+  source_id: openfda_enforcement      # crawl.source.source_id: the change log is filtered by it
+  schema: drug
+  table: recall
+  key: recall_number                  # equals crawl.record_change.record_key
+  active_column: is_active
+  order_by: recall_number
+
+children:
+  product_ndcs:
+    schema: drug
+    table: recall_product_ndc
+    join: {recall_number: recall_number}
+    select: product_ndc
+    order_by: product_ndc
+
+# "FDA drug recall D-0853-2026 - Pfizer Inc.", or "- unknown firm" when the firm is missing.
+title:
+  coalesce:
+    - {template: "FDA drug recall {recall_number} - {recalling_firm}"}
+    - {template: "FDA drug recall {recall_number} - unknown firm"}
+
+body:
+  - label: Recalling firm
+    value:
+      coalesce:
+        - {field: recalling_firm}
+        - {const: unknown firm}
+  - label: Firm location               # city + state, or the country when neither is known
+    value:
+      coalesce:
+        - {join: [city, state]}
+        - {field: country}
+  - {label: Recall classification, value: {field: classification}}
+  - {label: Status, value: {field: status}}
+  - {label: Product type, value: {field: product_type}}
+  - {label: Product description, value: {field: product_description}}
+  - {label: Quantity in commerce, value: {field: product_quantity}}
+  - {label: Reason for recall, value: {field: reason_for_recall}}
+  - {label: Lot / code information, value: {field: code_info}}
+  - {label: Distribution pattern, value: {field: distribution_pattern}}
+  - {label: Voluntary or mandated, value: {field: voluntary_mandated}}
+  - {label: How the firm notified the public, value: {field: initial_firm_notification}}
+  - {label: National drug codes involved, value: {field: product_ndcs}}
+  - {label: Recall initiated, value: {field: recall_initiation_date, format: iso}}
+  - {label: Reported by FDA, value: {field: report_date, format: iso}}
+  - {label: Terminated, value: {field: termination_date, format: iso}}
+
+# openFDA enforcement reports have no per-recall page.
+url: null
+
+metadata:
+  recall_number: {field: recall_number}
+  event_id: {field: event_id}
+  classification: {field: classification}
+  status: {field: status}
+  state: {field: state}
+  country: {field: country}
+  product_type: {field: product_type}
+  recall_date: {field: recall_initiation_date, format: iso}
+  year: {field: recall_initiation_date, format: year}
+
+scd2:
+  track: [title, body]                # a change here opens a new version
+  overwrite: [url, metadata]          # a change here updates the current version in place
+  version_on_activation_change: true  # a soft delete is history too (the chunks are moved, not re-embedded)
+
+quality:
+  - {rule: not_null, column: recall_number}
+  - {rule: unique, column: recall_number}
+  # The four values FDA actually uses, counted on the live source 2026-10-05: Class II 14,521,
+  # Class I 1,750, Class III 1,715, "Not Yet Classified" 1 (a report filed before the class is assigned).
+  # This rule found that fourth value; anything outside the set is new and worth a look.
+  - {rule: allowed_values, column: classification, severity: warn,
+     values: ["Class I", "Class II", "Class III", "Not Yet Classified"]}
+  - {rule: max_null_fraction, column: reason_for_recall, max: 0.5, severity: warn}

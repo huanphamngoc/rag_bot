@@ -1,0 +1,24 @@
+# Secrets. .env holds three database passwords, the Vertex project id and the path to the gcloud
+# config; .env.example is the committed copy, with placeholders.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local output
+*.log

@@ -1,0 +1,18 @@
+# The mlflow image builds with the repository root as its context (docker-compose.yml), so without
+# this .env would be sent to the daemon on every build. app/ has its own .dockerignore for the two
+# images built from that context.
+.env
+.env.*
+.git/
+.gitignore
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+
+docs/
+README.md
+app/tests/
